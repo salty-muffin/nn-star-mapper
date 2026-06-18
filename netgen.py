@@ -148,16 +148,17 @@ def save_preview(net: Network, path: Path) -> None:
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise click.ClickException("Preview needs matplotlib.") from exc
 
-    xs = [n.x for n in net.neurons]
-    ys = [n.y for n in net.neurons]
-    zs = [n.z for n in net.neurons]
+    # Plot axes are (depth, x, y) = (z, x, y); use this same ordering for both
+    # the nodes and the edge segments so lines actually connect the dots.
+    def plot_xyz(n: Neuron) -> tuple[float, float, float]:
+        return (n.z, n.x, n.y)
+
+    px = [p[0] for p in map(plot_xyz, net.neurons)]
+    py = [p[1] for p in map(plot_xyz, net.neurons)]
+    pz = [p[2] for p in map(plot_xyz, net.neurons)]
 
     segments = [
-        (
-            (net.neurons[i].x, net.neurons[i].y, net.neurons[i].z),
-            (net.neurons[j].x, net.neurons[j].y, net.neurons[j].z),
-        )
-        for i, j in net.edges
+        (plot_xyz(net.neurons[i]), plot_xyz(net.neurons[j])) for i, j in net.edges
     ]
 
     fig = plt.figure(figsize=(10, 6))
@@ -165,11 +166,15 @@ def save_preview(net: Network, path: Path) -> None:
     ax.add_collection3d(
         Line3DCollection(segments, colors="tab:blue", linewidths=0.3, alpha=0.3)
     )
-    ax.scatter(zs, xs, ys, c="white", edgecolors="black", s=20, depthshade=False)
+    ax.scatter(px, py, pz, c="white", edgecolors="black", s=20, depthshade=False)
     ax.set_xlabel("z (depth)")
     ax.set_ylabel("x")
     ax.set_zlabel("y")
-    ax.set_box_aspect((1, 1, 1))
+
+    # Equal scale on every axis: box aspect proportional to the data extents,
+    # so one unit is the same visual length on all three axes.
+    spans = [max(a) - min(a) or 1.0 for a in (px, py, pz)]
+    ax.set_box_aspect(spans)
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
 
