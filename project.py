@@ -35,7 +35,8 @@ the look we want (edges reading as lines between stars). A hard inlier count
     uv run python project.py --interactive
     uv run python project.py --tilt-el 35 --roll 12 --distance 18 \
         --pos-x 3024 --pos-y 1701 --pose-out data/pose.json
-    uv run python project.py --optimize --overlay data/overlay.png
+    uv run python project.py --interactive   # hand-pick a pose
+    uv run python optimize.py --tilt-az -40:40   # then auto-search a box
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from pathlib import Path
 
 import click
 import numpy as np
-from scipy.optimize import linear_sum_assignment, minimize
+from scipy.optimize import linear_sum_assignment
 from scipy.spatial import cKDTree
 
 
@@ -231,7 +232,8 @@ def project(neurons: np.ndarray, pose: Pose, focal_px: float) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Score:
-    soft: float  # sum of exp(-(d/sigma)^2) over matched pairs
+    soft: float  # sum of exp(-(d/sigma)^2) over matched pairs (pure geometry)
+    objective: float  # flux-weighted reward the optimiser maximises (== soft if unweighted)
     inliers: int  # matched pairs within eps px
     matches: np.ndarray  # (K, 2) int, (neuron_idx, star_idx)
     distances: np.ndarray  # (K,) px, matched-pair distances
@@ -244,6 +246,7 @@ def score_pose(
     sigma: float,
     eps: float,
     gate: float,
+    flux_weight: np.ndarray | None = None,
 ) -> Score:
     """Soft-score a projected template against the stars with unique matches.
 
@@ -252,32 +255,40 @@ def score_pose(
     assignment is found with the Hungarian algorithm maximizing the saturating
     reward ``exp(-(d/sigma)^2)``. Neurons with no star inside ``gate`` simply go
     unmatched -- not every neuron must find a star.
+
+    ``flux_weight`` is an optional per-star multiplier (length M); when given,
+    the assignment and the returned ``objective`` favour stars with higher
+    weight (e.g. brighter), while ``soft`` stays the pure geometric sum so the
+    reported fit is comparable across weightings.
     """
     # Candidate (neuron, star) pairs: only stars within the gate matter, since
     # the reward is ~0 beyond a few sigma anyway.
     neigh = star_tree.query_ball_point(points, r=gate)
-    rows, cols, rewards = [], [], []
+    rows, cols, base, weighted = [], [], [], []
     for ni, stars_near in enumerate(neigh):
         for si in stars_near:
             d = float(np.hypot(*(points[ni] - stars[si])))
+            b = np.exp(-((d / sigma) ** 2))
             rows.append(ni)
             cols.append(si)
-            rewards.append(np.exp(-((d / sigma) ** 2)))
+            base.append(b)
+            weighted.append(b * (flux_weight[si] if flux_weight is not None else 1.0))
     if not rows:
-        return Score(0.0, 0, np.empty((0, 2), int), np.empty(0))
+        return Score(0.0, 0.0, 0, np.empty((0, 2), int), np.empty(0))
 
     rows = np.array(rows)
     cols = np.array(cols)
-    rewards = np.array(rewards)
+    weighted = np.array(weighted)
 
-    # Hungarian over a compact dense reward matrix on just the involved rows/cols.
+    # Hungarian over a compact dense reward matrix on just the involved rows/cols,
+    # maximizing the (flux-weighted) reward so a bright star wins ties.
     uniq_n, n_idx = np.unique(rows, return_inverse=True)
     uniq_s, s_idx = np.unique(cols, return_inverse=True)
     reward_mat = np.zeros((len(uniq_n), len(uniq_s)))
-    reward_mat[n_idx, s_idx] = rewards
+    reward_mat[n_idx, s_idx] = weighted
     r_sel, c_sel = linear_sum_assignment(reward_mat, maximize=True)
 
-    matches, dists, soft = [], [], 0.0
+    matches, dists, soft, objective = [], [], 0.0, 0.0
     for r_i, c_i in zip(r_sel, c_sel):
         if reward_mat[r_i, c_i] <= 0:
             continue  # assignment padding, not a real candidate pair
@@ -286,51 +297,13 @@ def score_pose(
         matches.append((ni, si))
         dists.append(d)
         soft += float(np.exp(-((d / sigma) ** 2)))
+        objective += float(reward_mat[r_i, c_i])
 
     dists = np.array(dists)
     inliers = int(np.count_nonzero(dists <= eps)) if len(dists) else 0
-    return Score(soft, inliers, np.array(matches, dtype=int).reshape(-1, 2), dists)
-
-
-# --------------------------------------------------------------------------- #
-# Optimisation
-# --------------------------------------------------------------------------- #
-def optimize_pose(
-    scene: Scene,
-    start: Pose,
-    star_tree: cKDTree,
-    sigma: float,
-    eps: float,
-    gate: float,
-) -> Pose:
-    """Locally maximise the soft score from a hand-picked starting pose.
-
-    Hand-pick the orientation, then let Nelder-Mead snap the placement/scale to
-    land more neurons. Derivative-free because the Hungarian assignment makes the
-    score piecewise-flat. Angles, pixel offsets and distance live on very
-    different scales, so the simplex is seeded with per-parameter steps.
-    """
-
-    def neg_score(v: np.ndarray) -> float:
-        pose = Pose.from_vector(v)
-        pts = project(scene.neurons, pose, scene.focal_px)
-        return -score_pose(pts, scene.stars, star_tree, sigma, eps, gate).soft
-
-    x0 = start.as_vector()
-    steps = np.array([5.0, 5.0, 5.0, 50.0, 50.0, max(1.0, 0.1 * start.distance)])
-    simplex = np.vstack([x0, x0 + np.diag(steps)])
-    res = minimize(
-        neg_score,
-        x0,
-        method="Nelder-Mead",
-        options={
-            "initial_simplex": simplex,
-            "xatol": 1e-2,
-            "fatol": 1e-4,
-            "maxiter": 4000,
-        },
+    return Score(
+        soft, objective, inliers, np.array(matches, dtype=int).reshape(-1, 2), dists
     )
-    return Pose.from_vector(res.x)
 
 
 # --------------------------------------------------------------------------- #
@@ -550,7 +523,6 @@ def run_interactive(
 @click.option("--eps", type=float, default=6.0, show_default=True, help="Hard inlier tolerance in px (for the reported count).")  # fmt: skip
 @click.option("--gate", type=float, default=None, help="Max neuron-star pairing distance in px (default: 4*sigma).")  # fmt: skip
 @click.option("--pose-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Seed pose from a previously written pose JSON.")  # fmt: skip
-@click.option("--optimize", is_flag=True, help="Locally maximise the soft score from the (hand-set) start pose.")  # fmt: skip
 @click.option("--interactive", is_flag=True, help="Open a live slider window to drag the pose.")  # fmt: skip
 @click.option("--overlay", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write a static overlay image of the projection over the plate.")  # fmt: skip
 @click.option("--pose-out", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the final pose + score to JSON for downstream steps.")  # fmt: skip
@@ -571,7 +543,6 @@ def main(
     eps: float,
     gate: float | None,
     pose_in: Path | None,
-    optimize: bool,
     interactive: bool,
     overlay: Path | None,
     pose_out: Path | None,
@@ -614,15 +585,6 @@ def main(
     if interactive:
         plate = _load_plate(scene, image, stars_path)
         pose = run_interactive(scene, pose, star_tree, sigma, eps, gate, plate)
-
-    if optimize:
-        before = score_pose(project(scene.neurons, pose, scene.focal_px), scene.stars, star_tree, sigma, eps, gate)  # fmt: skip
-        pose = optimize_pose(scene, pose, star_tree, sigma, eps, gate)
-        after = score_pose(project(scene.neurons, pose, scene.focal_px), scene.stars, star_tree, sigma, eps, gate)  # fmt: skip
-        click.echo(
-            f"optimise: soft {before.soft:.2f} -> {after.soft:.2f}, "
-            f"inliers {before.inliers} -> {after.inliers}"
-        )
 
     pts = project(scene.neurons, pose, scene.focal_px)
     score = score_pose(pts, scene.stars, star_tree, sigma, eps, gate)
