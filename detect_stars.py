@@ -33,8 +33,8 @@ from photutils.detection import DAOStarFinder
 _LUMA = np.array([0.2126, 0.7152, 0.0722])
 
 
-def load_luminance(path: Path) -> np.ndarray:
-    """Read an image as a 2D float32 luminance array.
+def load_image(path: Path) -> np.ndarray:
+    """Read an image as a float32 array, ``(H, W)`` grayscale or ``(H, W, 3)`` RGB.
 
     Handles grayscale, RGB and RGBA inputs of any bit depth. An alpha channel,
     if present, is dropped.
@@ -44,9 +44,16 @@ def load_luminance(path: Path) -> np.ndarray:
         return img
     if img.ndim == 3:
         if img.shape[2] >= 3:
-            return img[..., :3] @ _LUMA
+            return img[..., :3]
         return img[..., 0]
     raise click.ClickException(f"Unsupported image shape {img.shape} from {path}")
+
+
+def to_luminance(img: np.ndarray) -> np.ndarray:
+    """Collapse an RGB array to a 2D luminance array; pass grayscale through."""
+    if img.ndim == 3:
+        return img @ _LUMA
+    return img
 
 
 def detect(
@@ -74,19 +81,25 @@ def detect(
 
 
 def save_preview(image: np.ndarray, stars: np.ndarray, path: Path) -> None:
-    """Write an annotated preview marking each detected star (needs matplotlib)."""
+    """Write an annotated preview marking each detected star (needs matplotlib).
+
+    ``image`` is the original plate (color or grayscale). The display stretch is
+    derived from its luminance so faint stars stay visible, then applied to the
+    color channels so the preview keeps the original look of the plate.
+    """
     try:
         import matplotlib.pyplot as plt
         from astropy.visualization import ZScaleInterval
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise click.ClickException("Preview needs matplotlib.") from exc
 
-    vmin, vmax = ZScaleInterval().get_limits(image)
+    vmin, vmax = ZScaleInterval().get_limits(to_luminance(image))
+    base = np.clip((image - vmin) / (vmax - vmin), 0.0, 1.0)
+    h, w = image.shape[:2]
     dpi = 100
-    h, w = image.shape
     fig = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
     ax = fig.add_axes((0, 0, 1, 1))
-    ax.imshow(image, cmap="gray", vmin=vmin, vmax=vmax, origin="upper")
+    ax.imshow(base, cmap=None if base.ndim == 3 else "gray", origin="upper")
     ax.scatter(
         stars[:, 0],
         stars[:, 1],
@@ -120,10 +133,11 @@ def main(
     preview: Path | None,
 ) -> None:
     """Detect stars in IMAGE_PATH and write (x, y, flux) to JSON."""
-    image = load_luminance(image_path)
-    height, width = image.shape
+    image = load_image(image_path)
+    luminance = to_luminance(image)
+    height, width = luminance.shape
 
-    stars = detect(image, fwhm=fwhm, threshold_sigma=threshold_sigma)
+    stars = detect(luminance, fwhm=fwhm, threshold_sigma=threshold_sigma)
     total = len(stars)
     if top_n is not None:
         stars = stars[:top_n]
