@@ -217,6 +217,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "photutils" },
+    { name = "scipy" },
 ]
 
 [package.metadata]
@@ -227,6 +228,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.11.0" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "photutils", specifier = ">=3.0.0" },
+    { name = "scipy", specifier = ">=1.17.1" },
 ]
 
 [[package]]
