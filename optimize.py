@@ -25,8 +25,22 @@ Each star gets a weight ``1 + alpha * w`` where ``w`` is its normalised flux
 both the assignment and the maximised objective via ``score_pose``. ``alpha = 0``
 recovers the pure geometric fit; raise it to bias toward brighter stars.
 
-    uv run python optimize.py --tilt-az -40:40 --tilt-el -40:40 --roll -180:180 \
-        --distance 12 --flux-alpha 1.0 --overlay data/opt.png --pose-out data/pose.json
+Two ways to set the box
+-----------------------
+* From scratch -- each axis flag is an absolute ``lo:hi`` range (or a bare number
+  to pin that axis):
+
+      uv run python optimize.py --tilt-az -40:40 --tilt-el -40:40 --distance 12
+
+* Around a base pose (``--pose-in``) -- the loaded pose is the centre of the box
+  and each bare-number flag is the *max deviation* (±) from it, so you can polish
+  a hand-picked pose without letting it wander: ``--tilt-az 10`` searches
+  ``centre ± 10``, ``0`` pins the axis, and ``lo:hi`` still forces an absolute
+  range for that one axis:
+
+      uv run python optimize.py --pose-in data/pose_02.json \\
+          --tilt-az 10 --tilt-el 10 --roll 15 --pos-x 150 --pos-y 150 --distance 0 \\
+          --flux-alpha 1.0 --overlay data/opt.png --pose-out data/pose.json
 """
 
 from __future__ import annotations
@@ -53,26 +67,63 @@ from project import (
 # Pose axis order used everywhere here and in Pose.as_vector / from_vector.
 AXES = ("tilt_az", "tilt_el", "roll", "pos_x", "pos_y", "distance")
 
+# Default ± deviation per axis when a base pose is loaded but the flag is omitted.
+DEFAULT_DEV = {
+    "tilt_az": 15.0,
+    "tilt_el": 15.0,
+    "roll": 20.0,
+    "pos_x": 200.0,
+    "pos_y": 200.0,
+    "distance": 3.0,
+}
+
 
 # --------------------------------------------------------------------------- #
 # Range parsing + flux weighting
 # --------------------------------------------------------------------------- #
 class Range(click.ParamType):
-    """A ``lo:hi`` search range, or a bare ``v`` to pin the axis to one value."""
+    """An axis spec: ``lo:hi`` (absolute interval) or a bare number.
+
+    A bare number is returned as a ``float`` and interpreted later by context: a
+    ± deviation when a base pose is loaded, otherwise a pinned value. An interval
+    is returned as a ``(lo, hi)`` tuple and is always absolute.
+    """
 
     name = "range"
 
-    def convert(self, value, param, ctx) -> tuple[float, float]:
+    def convert(self, value, param, ctx) -> float | tuple[float, float]:
+        if isinstance(value, (float, tuple)):  # default already resolved
+            return value
         try:
             if ":" in str(value):
                 lo, hi = (float(x) for x in str(value).split(":", 1))
-                if hi < lo:
-                    lo, hi = hi, lo
-                return (lo, hi)
-            v = float(value)
-            return (v, v)
+                return (lo, hi) if lo <= hi else (hi, lo)
+            return float(value)
         except ValueError:
             self.fail(f"{value!r} is not 'lo:hi' or a number", param, ctx)
+
+
+def resolve_bounds(
+    name: str,
+    spec: float | tuple[float, float] | None,
+    center: float | None,
+    default_abs: tuple[float, float],
+) -> tuple[float, float]:
+    """Turn an axis flag into concrete ``(lo, hi)`` search bounds.
+
+    ``lo:hi`` is always absolute. A bare number is a ± deviation around
+    ``center`` when a base pose is loaded (``0`` pins the axis), or a pinned value
+    when there is no center. An omitted flag (``spec is None``) falls back to the
+    default deviation around the center, or to ``default_abs`` with no center.
+    """
+    if isinstance(spec, tuple):
+        return spec
+    if center is not None:
+        dev = DEFAULT_DEV[name] if spec is None else abs(spec)
+        return (center - dev, center + dev)
+    if spec is None:
+        return default_abs
+    return (spec, spec)
 
 
 def flux_weights(flux: np.ndarray, mode: str, alpha: float) -> np.ndarray | None:
@@ -177,12 +228,13 @@ RANGE = Range()
 @click.option("--image", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Plate image for the overlay backdrop (default: path in stars JSON).")  # fmt: skip
 @click.option("--top-n", type=int, default=None, help="Use only the brightest N stars as targets (default: all).")  # fmt: skip
 @click.option("--focal-px", type=float, default=None, help="Override focal length in pixels (default: value from stars JSON).")  # fmt: skip
-@click.option("--tilt-az", type=RANGE, default="-45:45", show_default=True, help="Azimuth-tilt range 'lo:hi' in degrees, or a number to pin it.")  # fmt: skip
-@click.option("--tilt-el", type=RANGE, default="-45:45", show_default=True, help="Elevation-tilt range 'lo:hi' in degrees, or a number to pin it.")  # fmt: skip
-@click.option("--roll", type=RANGE, default="-180:180", show_default=True, help="Roll range 'lo:hi' in degrees, or a number to pin it.")  # fmt: skip
-@click.option("--pos-x", type=RANGE, default=None, help="Image-x range 'lo:hi' in px (default: full image width).")  # fmt: skip
-@click.option("--pos-y", type=RANGE, default=None, help="Image-y range 'lo:hi' in px (default: full image height).")  # fmt: skip
-@click.option("--distance", type=RANGE, default="8:30", show_default=True, help="Distance range 'lo:hi', or a number to pin the on-screen scale.")  # fmt: skip
+@click.option("--pose-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Base pose JSON; axis flags become ± deviations around it.")  # fmt: skip
+@click.option("--tilt-az", type=RANGE, default=None, help="Azimuth tilt: ±deviation from --pose-in, or 'lo:hi' absolute degrees.")  # fmt: skip
+@click.option("--tilt-el", type=RANGE, default=None, help="Elevation tilt: ±deviation from --pose-in, or 'lo:hi' absolute degrees.")  # fmt: skip
+@click.option("--roll", type=RANGE, default=None, help="Roll: ±deviation from --pose-in, or 'lo:hi' absolute degrees.")  # fmt: skip
+@click.option("--pos-x", type=RANGE, default=None, help="Image x: ±deviation from --pose-in, or 'lo:hi' absolute px.")  # fmt: skip
+@click.option("--pos-y", type=RANGE, default=None, help="Image y: ±deviation from --pose-in, or 'lo:hi' absolute px.")  # fmt: skip
+@click.option("--distance", type=RANGE, default=None, help="Distance: ±deviation from --pose-in, or 'lo:hi' absolute.")  # fmt: skip
 @click.option("--flux-alpha", type=float, default=0.0, show_default=True, help="Brightness bias: 0 = pure geometry, higher favours brighter stars.")  # fmt: skip
 @click.option("--flux-norm", type=click.Choice(["rank", "log", "none"]), default="rank", show_default=True, help="How star flux is normalised before weighting.")  # fmt: skip
 @click.option("--sigma", type=float, default=8.0, show_default=True, help="Soft-match falloff in px; several near-misses beat one exact hit.")  # fmt: skip
@@ -200,12 +252,13 @@ def main(
     image: Path | None,
     top_n: int | None,
     focal_px: float | None,
-    tilt_az: tuple[float, float],
-    tilt_el: tuple[float, float],
-    roll: tuple[float, float],
-    pos_x: tuple[float, float] | None,
-    pos_y: tuple[float, float] | None,
-    distance: tuple[float, float],
+    pose_in: Path | None,
+    tilt_az: float | tuple[float, float] | None,
+    tilt_el: float | tuple[float, float] | None,
+    roll: float | tuple[float, float] | None,
+    pos_x: float | tuple[float, float] | None,
+    pos_y: float | tuple[float, float] | None,
+    distance: float | tuple[float, float] | None,
     flux_alpha: float,
     flux_norm: str,
     sigma: float,
@@ -222,19 +275,30 @@ def main(
     scene = load_scene(network, stars_path, top_n, focal_px)
     if gate is None:
         gate = 4.0 * sigma
-    if pos_x is None:
-        pos_x = (0.0, float(scene.width))
-    if pos_y is None:
-        pos_y = (0.0, float(scene.height))
 
-    bounds = [tilt_az, tilt_el, roll, pos_x, pos_y, distance]
+    base = Pose(**json.loads(pose_in.read_text())["pose"]) if pose_in else None
+    centers = {n: (getattr(base, n) if base else None) for n in AXES}
+    default_abs = {
+        "tilt_az": (-45.0, 45.0),
+        "tilt_el": (-45.0, 45.0),
+        "roll": (-180.0, 180.0),
+        "pos_x": (0.0, float(scene.width)),
+        "pos_y": (0.0, float(scene.height)),
+        "distance": (8.0, 30.0),
+    }
+    specs = dict(zip(AXES, (tilt_az, tilt_el, roll, pos_x, pos_y, distance)))
+    bounds = [resolve_bounds(n, specs[n], centers[n], default_abs[n]) for n in AXES]
+
     star_tree = cKDTree(scene.stars)
     flux_w = flux_weights(scene.star_flux, flux_norm, flux_alpha)
 
-    free = [AXES[i] for i, (lo, hi) in enumerate(bounds) if hi > lo]
+    free = [
+        f"{n} [{lo:g},{hi:g}]" for n, (lo, hi) in zip(AXES, bounds) if hi > lo
+    ]
+    around = f" around {pose_in}" if base else ""
     click.echo(
-        f"searching {len(free)} axes ({', '.join(free) or 'none'}); "
-        f"flux bias alpha={flux_alpha:g} ({flux_norm})"
+        f"searching {len(free)} axes{around}: {', '.join(free) or 'none'}\n"
+        f"  flux bias alpha={flux_alpha:g} ({flux_norm})"
     )
     pose = search_pose(scene, bounds, star_tree, sigma, eps, gate, flux_w, maxiter, popsize, seed)  # fmt: skip
 
@@ -263,6 +327,7 @@ def main(
             "focal_px": scene.focal_px,
             "image_size": [scene.width, scene.height],
             "search": {
+                "pose_in": str(pose_in) if pose_in else None,
                 "bounds": {AXES[i]: list(b) for i, b in enumerate(bounds)},
                 "flux_alpha": flux_alpha,
                 "flux_norm": flux_norm,
