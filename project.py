@@ -131,7 +131,14 @@ class Pose:
 
     def as_vector(self) -> np.ndarray:
         return np.array(
-            [self.tilt_az, self.tilt_el, self.roll, self.pos_x, self.pos_y, self.distance]
+            [
+                self.tilt_az,
+                self.tilt_el,
+                self.roll,
+                self.pos_x,
+                self.pos_y,
+                self.distance,
+            ]
         )
 
     @classmethod
@@ -142,18 +149,64 @@ class Pose:
 def _rotation(tilt_az: float, tilt_el: float, roll: float) -> np.ndarray:
     """Build a rotation matrix from azimuth, elevation and roll (degrees).
 
-    ``roll`` spins the lattice in the image plane (about the view axis Z);
-    ``tilt_el`` / ``tilt_az`` tip it out of plane about X then Y. Applied as
-    R = Rz(roll) @ Ry(az) @ Rx(el) so roll stays a clean in-plane spin.
+    The out-of-plane tilt is one rotation about an axis lying *in* the image
+    plane -- ``tilt_el`` about the horizontal image axis X, ``tilt_az`` about the
+    vertical image axis Y -- via the exponential map (Rodrigues). Doing the two
+    tilts as a single axis-angle rotation rather than chained Euler angles avoids
+    gimbal lock: rotation about the horizontal axis stays available at any
+    azimuth (chained Euler collapses ``el`` into ``roll`` at ``az = 90``).
+    ``roll`` then spins the result in the image plane about the view axis Z.
     """
-    az, el, ro = np.radians([tilt_az, tilt_el, roll])
-    cx, sx = np.cos(el), np.sin(el)
-    cy, sy = np.cos(az), np.sin(az)
+    el, az, ro = np.radians([tilt_el, tilt_az, roll])
+    w = np.array([el, az, 0.0])  # tilt rotation vector: X=elevation, Y=azimuth
+    theta = float(np.linalg.norm(w))
+    if theta < 1e-12:
+        r_tilt = np.eye(3)
+    else:
+        k = w / theta
+        kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        r_tilt = np.eye(3) + np.sin(theta) * kx + (1 - np.cos(theta)) * (kx @ kx)
     cz, sz = np.cos(ro), np.sin(ro)
-    rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
-    ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
     rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
-    return rz @ ry @ rx
+    return rz @ r_tilt
+
+
+def format_flags(pose: Pose) -> str:
+    """Render a pose as the exact CLI flag string to paste back into a run."""
+    return (
+        f"--tilt-az {pose.tilt_az:g} --tilt-el {pose.tilt_el:g} --roll {pose.roll:g} "
+        f"--pos-x {pose.pos_x:.1f} --pos-y {pose.pos_y:.1f} --distance {pose.distance:g}"
+    )
+
+
+def copy_to_clipboard(text: str) -> str | None:
+    """Copy ``text`` to the system clipboard; return the tool used, or None.
+
+    Tries the common Linux clipboard CLIs (Wayland then X11). The caller also
+    prints the string, so a missing tool degrades gracefully to copy-by-hand.
+    """
+    import shutil
+    import subprocess
+
+    candidates = [
+        ("wl-copy", ["wl-copy"]),
+        ("xclip", ["xclip", "-selection", "clipboard"]),
+        ("xsel", ["xsel", "--clipboard", "--input"]),
+    ]
+    for tool, args in candidates:
+        if shutil.which(tool):
+            try:
+                subprocess.run(
+                    args,
+                    input=text.encode(),
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return tool
+            except Exception:  # noqa: BLE001 - any failure falls through to next tool
+                continue
+    return None
 
 
 def project(neurons: np.ndarray, pose: Pose, focal_px: float) -> np.ndarray:
@@ -270,7 +323,12 @@ def optimize_pose(
         neg_score,
         x0,
         method="Nelder-Mead",
-        options={"initial_simplex": simplex, "xatol": 1e-2, "fatol": 1e-4, "maxiter": 4000},
+        options={
+            "initial_simplex": simplex,
+            "xatol": 1e-2,
+            "fatol": 1e-4,
+            "maxiter": 4000,
+        },
     )
     return Pose.from_vector(res.x)
 
@@ -327,8 +385,13 @@ def render_overlay(
             disp = disp[::step, ::step]
         vmin, vmax = ZScaleInterval().get_limits(disp)
         ax.imshow(
-            disp, cmap="gray", vmin=vmin, vmax=vmax, origin="upper",
-            extent=(0, scene.width, scene.height, 0), zorder=0,
+            disp,
+            cmap="gray",
+            vmin=vmin,
+            vmax=vmax,
+            origin="upper",
+            extent=(0, scene.width, scene.height, 0),
+            zorder=0,
         )
     else:
         ax.scatter(scene.stars[:, 0], scene.stars[:, 1], s=6, c="0.5", zorder=0)
@@ -336,13 +399,20 @@ def render_overlay(
     # Edges as a faint fan so the dense lattice stays readable.
     segs = pts[scene.edges]
     ax.add_collection(
-        LineCollection(segs, colors="tab:cyan", linewidths=0.3, alpha=0.25, zorder=1)
+        LineCollection(segs, colors="tab:cyan", linewidths=0.5, alpha=0.5, zorder=1)
     )
 
     matched = set(int(n) for n in score.matches[:, 0]) if len(score.matches) else set()
     is_matched = np.array([i in matched for i in range(len(pts))])
-    ax.scatter(pts[~is_matched, 0], pts[~is_matched, 1], s=14, facecolors="none",
-               edgecolors="tab:orange", linewidths=0.8, zorder=3)
+    ax.scatter(
+        pts[~is_matched, 0],
+        pts[~is_matched, 1],
+        s=14,
+        facecolors="none",
+        edgecolors="tab:orange",
+        linewidths=0.8,
+        zorder=3,
+    )
     ax.scatter(pts[is_matched, 0], pts[is_matched, 1], s=14, c="lime", zorder=3)
 
     # A line from each matched neuron to its star, green when inside eps.
@@ -352,10 +422,13 @@ def render_overlay(
         ax.add_collection(LineCollection(link, colors=colors, linewidths=0.6, zorder=2))
 
     ax.text(
-        12, 28,
+        12,
+        28,
         f"soft={score.soft:.1f}  inliers<{eps:g}px={score.inliers}/{len(pts)}"
         f"  sigma={sigma:g}",
-        color="white", fontsize=12, family="monospace",
+        color="white",
+        fontsize=12,
+        family="monospace",
         bbox=dict(facecolor="black", alpha=0.6, pad=4),
     )
     fig.savefig(out_path, dpi=dpi)
@@ -372,7 +445,7 @@ def run_interactive(
     """
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
-    from matplotlib.widgets import Slider
+    from matplotlib.widgets import Button, Slider
 
     if plt.get_backend().lower() == "agg":
         raise click.ClickException(
@@ -381,7 +454,7 @@ def run_interactive(
 
     state = {"pose": pose}
     fig, ax = plt.subplots(figsize=(12, 7))
-    plt.subplots_adjust(bottom=0.34)
+    plt.subplots_adjust(bottom=0.40)
     ax.set_xlim(0, scene.width)
     ax.set_ylim(scene.height, 0)
     ax.set_aspect("equal")
@@ -393,8 +466,14 @@ def run_interactive(
         if disp.ndim == 3:
             disp = disp[..., :3] @ np.array([0.2126, 0.7152, 0.0722])
         vmin, vmax = ZScaleInterval().get_limits(disp)
-        ax.imshow(disp, cmap="gray", vmin=vmin, vmax=vmax, origin="upper",
-                  extent=(0, scene.width, scene.height, 0))
+        ax.imshow(
+            disp,
+            cmap="gray",
+            vmin=vmin,
+            vmax=vmax,
+            origin="upper",
+            extent=(0, scene.width, scene.height, 0),
+        )
     else:
         ax.scatter(scene.stars[:, 0], scene.stars[:, 1], s=6, c="0.5")
 
@@ -405,8 +484,11 @@ def run_interactive(
     title = ax.set_title("")
 
     specs = [
-        ("tilt_az", -180, 180), ("tilt_el", -180, 180), ("roll", -180, 180),
-        ("pos_x", 0, scene.width), ("pos_y", 0, scene.height),
+        ("tilt_az", -180, 180),
+        ("tilt_el", -180, 180),
+        ("roll", -180, 180),
+        ("pos_x", 0, scene.width),
+        ("pos_y", 0, scene.height),
         ("distance", 1, max(60, pose.distance * 3)),
     ]
     sliders = {}
@@ -429,6 +511,21 @@ def run_interactive(
 
     for s in sliders.values():
         s.on_changed(redraw)
+
+    # Copy the current pose as a ready-to-paste CLI flag string.
+    copy_ax = plt.axes((0.12, 0.31, 0.30, 0.045))
+    copy_btn = Button(copy_ax, "copy flags to clipboard")
+
+    def on_copy(_event) -> None:
+        flags = format_flags(state["pose"])
+        tool = copy_to_clipboard(flags)
+        note = f"copied via {tool}" if tool else "no clipboard tool found; copy below"
+        print(f"{flags}\n  [{note}]")
+        copy_btn.label.set_text("copied!" if tool else "copy failed - see terminal")
+        fig.canvas.draw_idle()
+
+    copy_btn.on_clicked(on_copy)
+
     redraw()
     plt.show()
     return state["pose"]
@@ -455,9 +552,9 @@ def run_interactive(
 @click.option("--pose-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Seed pose from a previously written pose JSON.")  # fmt: skip
 @click.option("--optimize", is_flag=True, help="Locally maximise the soft score from the (hand-set) start pose.")  # fmt: skip
 @click.option("--interactive", is_flag=True, help="Open a live slider window to drag the pose.")  # fmt: skip
-@click.option("--overlay", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write a static overlay PNG of the projection over the plate.")  # fmt: skip
+@click.option("--overlay", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write a static overlay image of the projection over the plate.")  # fmt: skip
 @click.option("--pose-out", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Write the final pose + score to JSON for downstream steps.")  # fmt: skip
-@click.option("--display-scale", type=float, default=1.0, show_default=True, help="Downsample factor for the overlay backdrop only (projection stays full-res).")  # fmt: skip
+@click.option("--display-scale", type=float, default=0.5, show_default=True, help="Downsample factor for the overlay backdrop only (projection stays full-res).")  # fmt: skip
 def main(
     network: Path,
     stars_path: Path,
@@ -498,8 +595,12 @@ def main(
     else:
         pose = Pose()
     for name, value in [
-        ("tilt_az", tilt_az), ("tilt_el", tilt_el), ("roll", roll),
-        ("pos_x", pos_x), ("pos_y", pos_y), ("distance", distance),
+        ("tilt_az", tilt_az),
+        ("tilt_el", tilt_el),
+        ("roll", roll),
+        ("pos_x", pos_x),
+        ("pos_y", pos_y),
+        ("distance", distance),
     ]:
         if pose_in is None or given(name):
             setattr(pose, name, value)
@@ -518,8 +619,10 @@ def main(
         before = score_pose(project(scene.neurons, pose, scene.focal_px), scene.stars, star_tree, sigma, eps, gate)  # fmt: skip
         pose = optimize_pose(scene, pose, star_tree, sigma, eps, gate)
         after = score_pose(project(scene.neurons, pose, scene.focal_px), scene.stars, star_tree, sigma, eps, gate)  # fmt: skip
-        click.echo(f"optimise: soft {before.soft:.2f} -> {after.soft:.2f}, "
-                   f"inliers {before.inliers} -> {after.inliers}")
+        click.echo(
+            f"optimise: soft {before.soft:.2f} -> {after.soft:.2f}, "
+            f"inliers {before.inliers} -> {after.inliers}"
+        )
 
     pts = project(scene.neurons, pose, scene.focal_px)
     score = score_pose(pts, scene.stars, star_tree, sigma, eps, gate)
