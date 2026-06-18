@@ -12,3 +12,6 @@ dependencies = [
     "numpy>=2.4.6",
     "photutils>=3.0.0",
 ]
+
+[tool.ruff.lint]
+ignore = ["E741"]
