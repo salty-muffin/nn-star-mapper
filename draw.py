@@ -7,15 +7,16 @@ flat background -- at the original plate's exact pixel dimensions. Both the edge
 colour and the background colour are full RGBA, so you can render glowing lines
 on a transparent canvas and do the fade as a straight composite downstream.
 
-The projection is identical to ``project.py`` (same pinhole, same pose), so point
-the ``--network`` at the snapped lattice (``snap.py`` output) and ``--pose-in`` at
-the pose it was snapped through, and every connection draws as a line between the
-real stars its neurons now sit on -- the constellation, with no diagnostic
-clutter. The edges are drawn with matplotlib's antialiased ``LineCollection`` so
-they match the look of the previews.
+The projection is identical to ``project.py`` (same pinhole, same pose). Point
+``--network`` at the snapped lattice (``snap.py`` output) and every connection
+draws as a line between the real stars its neurons now sit on -- the
+constellation, with no diagnostic clutter. The snapped file already records the
+pose it was snapped through, so ``--pose-in`` is optional; pass it only to draw a
+different lattice (e.g. the rigid ``netgen.py`` one) through a separate pose
+JSON. Edges use matplotlib's antialiased ``LineCollection`` to match the previews.
 
     uv run python draw.py --network data/network_snapped.json \
-        --pose-in data/pose_02.json --output data/drawing.png \
+        --output data/drawing.png \
         --edge-color "0.6,0.85,1.0,0.9" --bg-color "0,0,0,0" --line-width 2
 """
 
@@ -27,6 +28,25 @@ from pathlib import Path
 import click
 
 from project import Pose, load_scene, project
+
+
+# --------------------------------------------------------------------------- #
+# Pose loading
+# --------------------------------------------------------------------------- #
+def load_pose(data: dict) -> Pose | None:
+    """Pull a Pose from a JSON payload, tolerating either layout.
+
+    ``project.py --pose-out`` writes the pose at top level (``{"pose": {...}}``),
+    while ``snap.py`` records the pose it snapped through under its provenance
+    block (``{"snap": {"pose": {...}}}``). Accept both so the snapped network
+    file can double as the pose source. Returns None if neither is present.
+    """
+    if isinstance(data.get("pose"), dict):
+        return Pose(**data["pose"])
+    snap = data.get("snap")
+    if isinstance(snap, dict) and isinstance(snap.get("pose"), dict):
+        return Pose(**snap["pose"])
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -126,7 +146,7 @@ def render_edges(
 @click.command()
 @click.option("--network", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=Path("data/network.json"), show_default=True, help="Neuron geometry JSON; point at snap.py output for the finished on-stars look.")  # fmt: skip
 @click.option("--stars", "stars_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=Path("data/stars.json"), show_default=True, help="Detected-star JSON; supplies focal length and plate dimensions.")  # fmt: skip
-@click.option("--pose-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True, help="Pose JSON to project through (project.py --pose-out).")  # fmt: skip
+@click.option("--pose-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="Pose JSON to project through (default: read the pose from the snapped --network file).")  # fmt: skip
 @click.option("--focal-px", type=float, default=None, help="Override focal length in pixels (default: value from stars JSON).")  # fmt: skip
 @click.option("--edge-color", type=Color(), default="0.6,0.85,1.0,0.9", show_default=True, help="Edge RGBA: r,g,b[,a] (0-1 or 0-255), #rrggbbaa, or a colour name.")  # fmt: skip
 @click.option("--bg-color", type=Color(), default="0,0,0,0", show_default=True, help="Background RGBA (default: fully transparent).")  # fmt: skip
@@ -146,7 +166,16 @@ def main(
 ) -> None:
     """Draw the network's connections onto a plate-sized RGBA canvas."""
     scene = load_scene(network, stars_path, None, focal_px)
-    pose = Pose(**json.loads(pose_in.read_text())["pose"])
+
+    # The pose comes from --pose-in if given, else from the snap block written
+    # into the network file by snap.py -- so a snapped lattice is self-contained.
+    source = pose_in if pose_in is not None else network
+    pose = load_pose(json.loads(source.read_text()))
+    if pose is None:
+        raise click.ClickException(
+            f"No pose found in {source}. Pass --pose-in pointing at a "
+            "project.py --pose-out JSON, or a snapped --network from snap.py."
+        )
 
     render_edges(scene, pose, edge_color, bg_color, line_width, output, dpi)
     click.echo(
