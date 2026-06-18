@@ -100,17 +100,15 @@ def save_preview(image: np.ndarray, stars: np.ndarray, path: Path) -> None:
     plt.close(fig)
 
 
-# fmt: off
 @click.command()
-@click.argument("image_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=Path("data/stars.json"), show_default=True, help="Where to write the detected-star JSON.")
-@click.option("--fwhm", type=float, default=3.0, show_default=True, help="Expected star FWHM in pixels (DAOStarFinder kernel size).")
-@click.option("--threshold-sigma", type=float, default=5.0, show_default=True, help="Detection threshold, in std-devs above the background.")
-@click.option("--top-n", type=int, default=None, help="Keep only the brightest N stars (default: keep all).")
-@click.option("--focal-length", type=float, default=None, help="Lens focal length in mm. Metadata only -- not used for detection.")
-@click.option("--sensor-width", type=float, default=36.0, show_default=True, help="Sensor width in mm, used with --focal-length to record f in pixels.")
-@click.option("--preview", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Optional path for an annotated preview image.")
-# fmt: on
+@click.argument("image_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))  # fmt: skip
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=Path("data/stars.json"), show_default=True, help="Where to write the detected-star JSON.")  # fmt: skip
+@click.option("--fwhm", type=float, default=3.0, show_default=True, help="Expected star FWHM in pixels (DAOStarFinder kernel size).")  # fmt: skip
+@click.option("--threshold-sigma", type=float, default=5.0, show_default=True, help="Detection threshold, in std-devs above the background.")  # fmt: skip
+@click.option("--top-n", type=int, default=None, help="Keep only the brightest N stars (default: keep all).")  # fmt: skip
+@click.option("--focal-length", type=float, default=None, help="Lens focal length in mm. Metadata only -- not used for detection.")  # fmt: skip
+@click.option("--sensor-width", type=float, default=36.0, show_default=True, help="Sensor width in mm, used with --focal-length to record f in pixels.")  # fmt: skip
+@click.option("--preview", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Optional path for an annotated preview image.")  # fmt: skip
 def main(
     image_path: Path,
     output: Path,
