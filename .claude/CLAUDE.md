@@ -4,15 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-For a film shot, a 3D rendering of a small neural network blends into / fades out over a
-static starry night sky. As the network fades away, (at least some of) its neurons should
-sit _exactly_ on real stars, so the network's edges read as lines drawn **between actual
-stars** — a constellation made of the network's connections.
+For a film shot, a 3D rendering of a small neural network blends into / fades out over a static starry night sky. As the network fades away, (at least some of) its neurons should sit _exactly_ on real stars, so the network's edges read as lines drawn **between actual stars** — a constellation made of the network's connections.
 
 ## Engine & tooling
 
-Python for solver work; Blender Python (`bpy`, Blender's bundled interpreter) for
-render/export. `uv` manages the environment.
+Python for solver work; Blender Python (`bpy`, Blender's bundled interpreter) for render/export. `uv` manages the environment. `click` will be used for handling command line argumensts.
 
 ```sh
 uv sync                      # create/refresh the venv from pyproject + uv.lock
