@@ -27,8 +27,6 @@ from pathlib import Path
 
 import click
 
-DEFAULT_LAYERS = "8x8,6x6,6x6,4x4,2x5"
-
 
 @dataclass(frozen=True)
 class Neuron:
@@ -177,10 +175,10 @@ def save_preview(net: Network, path: Path) -> None:
 
 
 @click.command()
-@click.option("--layers", default=DEFAULT_LAYERS, show_default=True, help="Comma list of layer grids, e.g. 8x8,6x6,4x4 (bare N means Nx1).")  # fmt: skip
+@click.option("--layers", default="8x8,6x6,6x6,4x4,2x5", show_default=True, help="Comma list of layer grids, e.g. 8x8,6x6,4x4 (bare N means Nx1).")  # fmt: skip
 @click.option("--layer-spacing", type=float, default=1.0, show_default=True, help="Distance between adjacent layers along the depth axis.")  # fmt: skip
 @click.option("--neuron-spacing", type=float, default=1.0, show_default=True, help="In-plane spacing between neurons within a layer.")  # fmt: skip
-@click.option("-o", "--output", type=click.Path(dir_okay=False, path_type=Path), default=Path("data/network.json"), show_default=True, help="Where to write the network geometry JSON.")  # fmt: skip
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=Path("data/network.json"), show_default=True, help="Where to write the network geometry JSON.")  # fmt: skip
 @click.option("--preview", type=click.Path(dir_okay=False, path_type=Path),  default=None, help="Optional path for a 3D preview image.")  # fmt: skip
 def main(
     layers: str,
